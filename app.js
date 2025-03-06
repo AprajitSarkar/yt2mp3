@@ -39,6 +39,71 @@ setInterval(() => {
     });
 }, cacheDuration);
 
+// Direct URL-based conversion route
+app.get('/:videoUrl(*)', async (req, res) => {
+    try {
+        const url = req.params.videoUrl;
+        if (!url) {
+            return res.status(400).json({ error: 'URL is required' });
+        }
+        if (!ytdl.validateURL(url)) {
+            return res.status(400).json({ error: 'Invalid YouTube URL' });
+        }
+
+        const info = await ytdl.getInfo(url);
+        const title = info.videoDetails.title.replace(/[^\w\s]/gi,'');
+        const outputPath = path.join(cacheDir, `${title}.mp3`);
+
+        const audioStream = ytdl(url, { quality: 'highestaudio', filter: 'audioonly' });
+        const ffmpegCommand = ffmpeg(audioStream)
+            .audioBitrate(320)
+            .audioCodec('libmp3lame')
+            .audioChannels(2)
+            .audioFrequency(44100)
+            .format('mp3')
+            .on('start', () => {
+                console.log('Started FFmpeg conversion...');
+            })
+            .on('progress', (progress) => {
+                console.log(`Processing: ${progress.percent}% done`);
+            })
+            .on('end', () => {
+                console.log('Conversion completed successfully');
+                res.download(outputPath, `${title}.mp3`, (err) => {
+                    if (err) {
+                        console.error('Download error:', err);
+                        if (!res.headersSent) {
+                            res.status(500).json({ error: 'Download failed', details: err.message });
+                        }
+                    }
+                    // Clean up the file after successful download
+                    fs.unlink(outputPath, (unlinkErr) => {
+                        if (unlinkErr) console.error('Failed to cleanup file:', unlinkErr);
+                    });
+                });
+            })
+            .on('error', (err) => {
+                console.error('FFmpeg error:', err);
+                if (!res.headersSent) {
+                    res.status(500).json({ error: 'Conversion failed', details: err.message });
+                }
+                // Clean up any partial files on error
+                fs.unlink(outputPath, () => {});
+            });
+
+        ffmpegCommand.save(outputPath);
+
+        req.on('close', () => {
+            console.log('Client aborted download. Stopping FFmpeg...');
+            ffmpegCommand.kill('SIGKILL');
+            fs.unlink(outputPath, () => {});
+        });
+    } catch (error) {
+        console.error('Conversion error:', error);
+        res.status(500).json({ error: 'Failed to process request' });
+    }
+});
+
 // API endpoint to validate YouTube URL
 app.post('/api/validate', async (req, res) => {
     try {
